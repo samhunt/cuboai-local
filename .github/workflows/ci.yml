@@ -94,8 +94,18 @@ jobs:
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
         run: |
-          printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 -d > "${{ github.workspace }}/release.jks"
+          printf '%s' "$SIGNING_KEYSTORE_BASE64" | tr -d ' \n\r\t"' | base64 -d > "${{ github.workspace }}/release.jks"
           test -s "${{ github.workspace }}/release.jks"
+          python3 - <<'PY'
+          from pathlib import Path
+          data = Path("release.jks").read_bytes()
+          if not (data.startswith(b"\x30") or data[:4] == b"\xfe\xed\xfe\xed"):
+              raise SystemExit(
+                  "SIGNING_KEYSTORE_BASE64 decoded, but it is not a Java keystore. "
+                  "Paste only the one-line base64 of cuboai-local.jks — no [Storing ...] text."
+              )
+          print(f"keystore bytes={len(data)}")
+          PY
 
       - name: Build signed release APK
         env:
