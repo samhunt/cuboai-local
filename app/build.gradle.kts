@@ -92,7 +92,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.cuboai.local"
+        applicationId = "app.cubo.local"
         minSdk = 26
         targetSdk = 35
         versionCode = versionCodeFromEnv
