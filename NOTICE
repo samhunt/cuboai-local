@@ -1,0 +1,31 @@
+cuboai-local
+Copyright (c) 2026
+Licensed under the MIT License. See LICENSE.
+
+This application bundles third-party software. Their licenses remain in force.
+
+Apache License 2.0
+  Android Jetpack (Activity, Lifecycle, Security Crypto, and related libraries)
+  Jetpack Compose
+  Media3 (ExoPlayer)
+  Kotlin standard library and coroutines
+  AWS SDK for Android (Cognito Identity Provider)
+  OkHttp
+  Copyright The Android Open Source Project, JetBrains, Amazon.com, Square, and contributors
+  https://www.apache.org/licenses/LICENSE-2.0
+
+MIT License
+  Chaquopy (Python for Android)
+  Copyright (c) Chaotic Neural LLC, BeeWare, and contributors
+  https://github.com/chaquo/chaquopy/blob/master/LICENSE
+
+PSF License
+  Python
+  Copyright © Python Software Foundation
+  https://docs.python.org/3/license.html
+
+The TUTK / Kalay protocol facts used at runtime are not copyrightable. The
+ThroughTek native SDK is not redistributed.
+
+LAN session modules are downloaded at build time as a third-party MIT
+dependency and are not source in this repository.

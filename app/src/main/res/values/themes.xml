@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.CuboLocal" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#FF121418</item>
+        <item name="android:navigationBarColor">#FF121418</item>
+        <item name="android:windowBackground">#FF121418</item>
+    </style>
+</resources>

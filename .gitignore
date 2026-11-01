@@ -1,0 +1,25 @@
+*.iml
+.gradle/
+.kotlin/
+local.properties
+.idea/
+.DS_Store
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.jks
+*.keystore
+keystore.properties
+release.jks
+
+# Downloaded here by Gradle at build time — not source in this repo
+app/src/main/python/cuboai_*.py
+app/src/main/python/__pycache__/
+app/src/main/assets/LICENSE
+app/src/main/assets/NOTICE
