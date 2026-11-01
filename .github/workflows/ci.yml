@@ -124,7 +124,7 @@ jobs:
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-          VERSION_NAME: ${{ github.ref_name }}
+          VERSION_NAME: 0.1.${{ github.run_number }}
           VERSION_CODE: ${{ github.run_number }}
         run: |
           chmod +x gradlew
@@ -135,7 +135,7 @@ jobs:
         id: apk
         run: |
           src=$(ls app/build/outputs/apk/release/*.apk | head -n1)
-          dest="$RUNNER_TEMP/cuboai-local-release.apk"
+          dest="$RUNNER_TEMP/cuboai-local-0.1.${{ github.run_number }}.apk"
           cp "$src" "$dest"
           echo "path=$dest" >> "$GITHUB_OUTPUT"
 
@@ -149,11 +149,12 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: cuboai-local latest
+          tag_name: build-${{ github.run_number }}
+          name: cuboai-local 0.1.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           make_latest: true
           files: ${{ steps.apk.outputs.path }}
           body: |
             Signed release APK from `${{ github.sha }}`.
             Application id: `app.cubo.local`.
+            Version: `0.1.${{ github.run_number }}`.
