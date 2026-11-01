@@ -34,14 +34,14 @@ Requires JDK 17, Python 3.14 (Chaquopy bytecode), the Android SDK, and network o
 
 ## Release (GitHub Actions)
 
-Push a tag:
+Every push to `main` (and **Actions → CI → Run workflow**) builds a **signed** release APK and uploads it as the `cuboai-local-release` artifact.
+
+A GitHub Release is created when you push a version tag:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
-
-CI builds a **signed** release APK and attaches it to a GitHub Release named `cuboai-local v0.1.0`.
 
 ### GitHub secrets
 
