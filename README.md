@@ -34,9 +34,9 @@ Requires JDK 17, Python 3.14 (Chaquopy bytecode), the Android SDK, and network o
 
 ## Release (GitHub Actions)
 
-Every push to `main` (and **Actions → CI → Run workflow**) builds a **signed** release APK and uploads it as the `cuboai-local-release` artifact.
+Every push to `main` (and **Actions → CI → Run workflow**) builds a **signed** release APK, uploads the `cuboai-local-release` artifact, and updates the [latest GitHub Release](https://github.com/samhunt/cuboai-local/releases/latest).
 
-A GitHub Release is created when you push a version tag:
+A versioned GitHub Release is also created when you push a tag:
 
 ```bash
 git tag v0.1.0

@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   debug:
     name: Build debug APK
@@ -142,3 +145,15 @@ jobs:
           name: cuboai-local-release
           path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: cuboai-local latest
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: ${{ steps.apk.outputs.path }}
+          body: |
+            Signed release APK from `${{ github.sha }}`.
+            Application id: `app.cubo.local`.
