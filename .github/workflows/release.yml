@@ -25,7 +25,13 @@ jobs:
         with:
           python-version: "3.14"
 
-      - uses: android-actions/setup-android@v3
+      # GitHub-hosted runners already ship the Android SDK. Do not install the
+      # retired `tools` package that android-actions/setup-android requests by default.
+      - name: Accept Android SDK licenses
+        run: |
+          sdk="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          sm="$(ls -1 "$sdk"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | tail -n1)"
+          yes | "$sm" --licenses >/dev/null || true
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
