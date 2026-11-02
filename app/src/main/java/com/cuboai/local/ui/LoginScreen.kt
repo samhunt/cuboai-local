@@ -206,7 +206,7 @@ private fun CuboAccountFields(
         Field("Admin account", state.form.account) { value ->
             onFormChange { it.copy(account = value) }
         }
-        Field("Admin password", state.form.password, KeyboardType.Password, password = true) { value ->
+        Field("Admin password", state.form.password) { value ->
             onFormChange { it.copy(password = value) }
         }
     }
@@ -225,7 +225,7 @@ private fun ManualFields(
     Field("Name", form.name) { value -> onFormChange { it.copy(name = value) } }
     Field("Device UID", form.uid) { value -> onFormChange { it.copy(uid = value) } }
     Field("Admin account", form.account) { value -> onFormChange { it.copy(account = value) } }
-    Field("Admin password", form.password, KeyboardType.Password, password = true) { value ->
+    Field("Admin password", form.password) { value ->
         onFormChange { it.copy(password = value) }
     }
 }
