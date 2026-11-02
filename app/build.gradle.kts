@@ -12,11 +12,15 @@ val pythonLibModules = listOf(
     "cuboai_pure.py",
     "cuboai_messages.py",
     "cuboai_session.py",
-    "cuboai_connect.py",
     "cuboai_transport_py.py",
     "cuboai_mpegts.py",
     "cuboai_pts.py",
     "cuboai_stream_video.py",
+)
+
+// Present in a local cuboai-tutk checkout, not yet on Fredde87/cuboai-tutk main.
+val pythonLibOptionalModules = listOf(
+    "cuboai_connect.py",
 )
 
 val pythonLibDir = layout.buildDirectory.dir("python-lib")
@@ -25,6 +29,8 @@ val tutkRef = providers.gradleProperty("cuboai.tutkRef").orElse("main")
 val fetchPythonLib by tasks.registering {
     description = "Copy LAN protocol modules from a local cuboai-tutk checkout, else download them."
     val modules = pythonLibModules
+    val optional = pythonLibOptionalModules
+    val wanted = modules + optional
     val ref = tutkRef
     val destDir = pythonLibDir
     val localCandidates = listOf(
@@ -35,7 +41,10 @@ val fetchPythonLib by tasks.registering {
         modules.all { dir.resolve(it).isFile }
     }
     if (localTutk != null) {
-        modules.forEach { inputs.file(localTutk.resolve(it)) }
+        wanted.forEach { name ->
+            val file = localTutk.resolve(name)
+            if (file.isFile) inputs.file(file)
+        }
     }
     outputs.dir(destDir)
     doLast {
@@ -44,7 +53,7 @@ val fetchPythonLib by tasks.registering {
         if (localTutk != null) {
             copy {
                 from(localTutk)
-                include(*modules.toTypedArray())
+                include(*wanted.toTypedArray())
                 into(dest)
             }
             return@doLast
@@ -60,7 +69,7 @@ val fetchPythonLib by tasks.registering {
         }
         copy {
             from(tarTree(archive))
-            modules.forEach { include("**/$it") }
+            wanted.forEach { include("**/$it") }
             eachFile { relativePath = RelativePath(true, name) }
             includeEmptyDirs = false
             into(dest)
@@ -77,7 +86,7 @@ val syncPythonLib by tasks.registering(Copy::class) {
     description = "Copy downloaded LAN protocol modules into the Chaquopy source set."
     dependsOn(fetchPythonLib)
     from(pythonLibDir)
-    include(*pythonLibModules.toTypedArray())
+    include(*(pythonLibModules + pythonLibOptionalModules).toTypedArray())
     into(layout.projectDirectory.dir("src/main/python"))
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
 }
