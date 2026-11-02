@@ -1,12 +1,14 @@
 package com.cuboai.local.data
 
 import android.util.Log
+import androidx.annotation.Keep
 import java.util.ArrayDeque
 
 /**
  * In-process MPEG-TS ring buffer. The Python muxer pushes chunks; ExoPlayer reads
  * them through [TsHubDataSource] so the live feed never depends on loopback HTTP.
  */
+@Keep
 class TsHub private constructor() {
     private val lock = Object()
     private val chunks = ArrayDeque<ByteArray>()

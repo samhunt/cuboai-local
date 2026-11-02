@@ -277,8 +277,7 @@ class CuboViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         },
                         onFailure = { err ->
-                            withContext(pythonDispatcher) { runCatching { bridge.disconnect() } }
-                            failConnect(err.message, stayOnMonitorIfFail)
+                            failConnect(err.message, stayOnMonitor = true)
                         },
                     )
                 },
