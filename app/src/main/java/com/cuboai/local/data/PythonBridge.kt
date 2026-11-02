@@ -1,26 +1,73 @@
 package com.cuboai.local.data
 
+import android.util.Log
 import com.chaquo.python.Python
 import org.json.JSONObject
+import kotlin.concurrent.thread
 
 class PythonBridge {
     private val module by lazy { Python.getInstance().getModule("bridge") }
+    private val muxLock = Any()
+    private var muxJavaThread: Thread? = null
 
     fun connect(creds: CameraCredentials): Result<Unit> =
         call("connect", creds.uid, creds.account, creds.password, creds.ip)
 
-    fun disconnect(): Result<Unit> = call("disconnect")
-
-    fun startStreamServer(): Result<String> {
-        val json = invoke("start_stream_server")
-        return if (json.optBoolean("ok")) {
-            Result.success(json.optString("url"))
-        } else {
-            Result.failure(IllegalStateException(json.optString("error", "Stream failed")))
-        }
+    fun disconnect(): Result<Unit> {
+        TsHub.INSTANCE.running = false
+        TsHub.INSTANCE.clear()
+        return call("disconnect")
     }
 
-    fun stopStream(): Result<Unit> = call("stop_stream")
+    fun startStreamServer(): Result<String> {
+        val hub = TsHub.INSTANCE
+        hub.clear()
+        hub.running = true
+        val json = invoke("start_stream_server")
+        if (!json.optBoolean("ok")) {
+            hub.running = false
+            return Result.failure(IllegalStateException(json.optString("error", "Stream failed")))
+        }
+        invoke("set_ts_hub", hub)
+        synchronized(muxLock) {
+            if (muxJavaThread?.isAlive != true) {
+                muxJavaThread = thread(name = "cuboai-mux", isDaemon = true) {
+                    try {
+                        Log.i("cuboai-mux", "run_mux_loop enter")
+                        module.callAttr("set_ts_hub", TsHub.INSTANCE)
+                        module.callAttr("run_mux_loop")
+                        Log.i("cuboai-mux", "run_mux_loop returned")
+                    } catch (err: Exception) {
+                        Log.e("cuboai-mux", "run_mux_loop failed", err)
+                    }
+                }
+            }
+        }
+        repeat(60) { i ->
+            val available = hub.available()
+            if (available >= 80_000) {
+                Log.i("cuboai-mux", "ts ready bytes=$available")
+                return Result.success("cuboai://live.ts")
+            }
+            if (i % 5 == 4) {
+                Log.i("cuboai-mux", "waiting for ts bytes=$available")
+            }
+            Thread.sleep(200)
+        }
+        val leftover = hub.available()
+        if (leftover >= 188 * 10) {
+            Log.i("cuboai-mux", "ts partial bytes=$leftover")
+            return Result.success("cuboai://live.ts")
+        }
+        hub.running = false
+        Log.w("cuboai-mux", "no video bytes leftover=$leftover")
+        return Result.failure(IllegalStateException("No video bytes from the camera yet."))
+    }
+
+    fun stopStream(): Result<Unit> {
+        TsHub.INSTANCE.running = false
+        return call("stop_stream")
+    }
 
     fun sensors(): Result<CameraStatus> {
         val json = invoke("sensors")

@@ -8,7 +8,11 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import threading
+import time
+import traceback
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
@@ -17,13 +21,20 @@ from cuboai_session import get_session
 from cuboai_stream_video import apply_env_profile, mux_timed_stream
 
 STREAM_PORT = 18765
+_TS_CAP = 2 * 1024 * 1024
 
 _lock = threading.Lock()
 _session = None
 _http = None
 _http_thread = None
+_mux_thread = None
 _stream_stop = threading.Event()
 _streaming = False
+_ts_cond = threading.Condition()
+_ts_chunks: deque[bytes] = deque()
+_ts_bytes = 0
+_ts_head = 0
+_ts_tail = 0
 
 
 def _ok(**extra):
@@ -80,8 +91,14 @@ def connect(uid: str, account: str, password: str, camera_ip: str) -> str:
 
 def disconnect() -> str:
     """Stop HTTP + AV and close the camera session."""
-    global _session, _http, _http_thread, _streaming
+    global _session, _http, _http_thread, _mux_thread, _streaming, _ts_bytes, _ts_head, _ts_tail
     _stream_stop.set()
+    with _ts_cond:
+        _ts_cond.notify_all()
+    mux = _mux_thread
+    if mux is not None and mux.is_alive():
+        mux.join(timeout=2.0)
+    _mux_thread = None
     http = _http
     if http is not None:
         try:
@@ -97,6 +114,11 @@ def disconnect() -> str:
     _http = None
     _http_thread = None
     _streaming = False
+    with _ts_cond:
+        _ts_chunks.clear()
+        _ts_bytes = 0
+        _ts_head = 0
+        _ts_tail = 0
     sess = _session
     _session = None
     if sess is not None:
@@ -116,66 +138,185 @@ def stream_url() -> str:
     return _ok(url=f"http://127.0.0.1:{STREAM_PORT}/live.ts", port=STREAM_PORT)
 
 
+def _log(msg: str) -> None:
+    try:
+        from android.util import Log
+        Log.i("cuboai-mux", msg)
+    except Exception:
+        print(msg, file=sys.stderr, flush=True)
+
+
+_java_hub = None
+
+
+def set_ts_hub(hub) -> str:
+    global _java_hub
+    _java_hub = hub
+    return _ok()
+
+
+def _push_ts(chunk: bytes) -> None:
+    global _ts_bytes, _ts_head, _ts_tail
+    if not chunk:
+        return
+    with _ts_cond:
+        _ts_chunks.append(chunk)
+        _ts_bytes += len(chunk)
+        _ts_tail += len(chunk)
+        while _ts_bytes > _TS_CAP and _ts_chunks:
+            old = _ts_chunks.popleft()
+            _ts_bytes -= len(old)
+            _ts_head += len(old)
+        _ts_cond.notify_all()
+    hub = _java_hub
+    if hub is None:
+        _log("[mux] TsHub missing; dropping %d bytes" % len(chunk))
+        return
+    try:
+        hub.push(chunk)
+    except Exception as exc:
+        _log("[mux] TsHub.push failed: %s" % exc)
+
+
+def _read_ts_from(pos: int, timeout: float) -> tuple[bytes, int]:
+    deadline = time.monotonic() + timeout
+    with _ts_cond:
+        while _ts_tail <= pos and not _stream_stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return b"", pos
+            _ts_cond.wait(remaining)
+        if pos < _ts_head:
+            pos = _ts_head
+        skip = pos - _ts_head
+        parts = []
+        for chunk in _ts_chunks:
+            if skip >= len(chunk):
+                skip -= len(chunk)
+                continue
+            parts.append(chunk[skip:] if skip else chunk)
+            skip = 0
+        return b"".join(parts), _ts_tail
+
+
+def _mux_loop() -> None:
+    global _streaming
+    _streaming = True
+    try:
+        def emit(chunk: bytes):
+            if _stream_stop.is_set():
+                raise BrokenPipeError("stopped")
+            _push_ts(chunk)
+
+        while not _stream_stop.is_set():
+            sess = _session
+            if sess is None:
+                break
+            _log("[mux] starting MPEG-TS muxer")
+            try:
+                mux_timed_stream(
+                    sess.av_frames_timed(),
+                    emit,
+                    clean_gop=True,
+                    mux_audio=True,
+                    log=_log,
+                )
+                _log("[mux] timed stream ended")
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                _log(f"[mux] stream closed: {type(exc).__name__}: {exc}")
+                if _stream_stop.is_set():
+                    break
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
+            if _stream_stop.is_set():
+                break
+            time.sleep(0.3)
+    finally:
+        _streaming = False
+        with _ts_cond:
+            _ts_cond.notify_all()
+
+
+def run_mux_loop() -> str:
+    """Entry point for a Java thread. Chaquopy Python threads do not run while a
+    Java-called function is on the cuboai-python dispatcher."""
+    global _mux_thread
+    _mux_thread = threading.current_thread()
+    try:
+        _mux_loop()
+    finally:
+        if _mux_thread is threading.current_thread():
+            _mux_thread = None
+    return _ok()
+
+
+def ts_ready() -> str:
+    with _ts_cond:
+        if _ts_bytes >= 188 * 24:
+            return _ok(bytes=_ts_bytes)
+    return _err("not yet")
+
+
+def wait_ts(timeout_sec: float = 8.0) -> str:
+    deadline = time.monotonic() + float(timeout_sec)
+    with _ts_cond:
+        while not _ts_chunks and not _stream_stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            _ts_cond.wait(remaining)
+        if _ts_chunks:
+            return _ok(bytes=_ts_bytes)
+    return _err("No video bytes yet.")
+
+
 class _LiveHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         return
 
-    def do_HEAD(self):
-        if self.path.split("?", 1)[0] != "/live.ts":
-            self.send_error(404)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "video/MP2T")
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Connection", "close")
-        self.end_headers()
-
-    def do_GET(self):
-        global _streaming
-        if self.path.split("?", 1)[0] != "/live.ts":
-            self.send_error(404)
-            return
-        sess = _session
-        if sess is None:
-            self.send_error(503, "Camera is not connected")
-            return
+    def _send_ts_headers(self):
         self.send_response(200)
         self.send_header("Content-Type", "video/MP2T")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        _stream_stop.clear()
-        _streaming = True
 
-        def emit(chunk: bytes):
-            if _stream_stop.is_set():
-                raise BrokenPipeError("stopped")
-            self.wfile.write(chunk)
-            self.wfile.flush()
+    def do_HEAD(self):
+        if self.path.split("?", 1)[0] != "/live.ts":
+            self.send_error(404)
+            return
+        self._send_ts_headers()
 
+    def do_GET(self):
+        if self.path.split("?", 1)[0] != "/live.ts":
+            self.send_error(404)
+            return
+        if _session is None:
+            self.send_error(503, "Camera is not connected")
+            return
+        self._send_ts_headers()
+        with _ts_cond:
+            pos = _ts_head
+        sent_media = False
+        idle = 0
         try:
-            mux_timed_stream(
-                sess.av_frames_timed(),
-                emit,
-                clean_gop=True,
-                mux_audio=True,
-                log=lambda *_a, **_k: None,
-            )
+            while not _stream_stop.is_set() and _session is not None:
+                data, pos = _read_ts_from(pos, 0.4)
+                if data:
+                    sent_media = True
+                    idle = 0
+                    self.wfile.write(data)
+                    self.wfile.flush()
+                    continue
+                idle += 1
+                if sent_media and idle % 5 == 0:
+                    self.wfile.write(b"\x47\x1f\xff\x10" + b"\xff" * 184)
+                    self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
-        except Exception:
-            pass
-        finally:
-            _streaming = False
-            try:
-                inner = _inner()
-                if inner is not None:
-                    inner._stop_reader()
-            except Exception:
-                pass
 
 
 def start_stream_server() -> str:
@@ -184,22 +325,24 @@ def start_stream_server() -> str:
     if _session is None:
         return _err("Connect to the camera first.")
     with _lock:
-        if _http is not None:
-            return stream_url()
-        try:
-            httpd = ThreadingHTTPServer(("127.0.0.1", STREAM_PORT), _LiveHandler)
-            httpd.daemon_threads = True
-        except OSError as exc:
-            return _err(f"Could not bind local stream port: {exc}")
-        _http = httpd
-        t = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.3}, daemon=True)
-        _http_thread = t
-        t.start()
+        _stream_stop.clear()
+        if _http is None:
+            try:
+                httpd = ThreadingHTTPServer(("127.0.0.1", STREAM_PORT), _LiveHandler)
+                httpd.daemon_threads = True
+            except OSError as exc:
+                return _err(f"Could not bind local stream port: {exc}")
+            _http = httpd
+            t = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.3}, daemon=True)
+            _http_thread = t
+            t.start()
         return stream_url()
 
 
 def stop_stream() -> str:
     _stream_stop.set()
+    with _ts_cond:
+        _ts_cond.notify_all()
     inner = _inner()
     if inner is not None:
         try:

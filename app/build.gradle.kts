@@ -12,6 +12,7 @@ val pythonLibModules = listOf(
     "cuboai_pure.py",
     "cuboai_messages.py",
     "cuboai_session.py",
+    "cuboai_connect.py",
     "cuboai_transport_py.py",
     "cuboai_mpegts.py",
     "cuboai_pts.py",
@@ -22,14 +23,32 @@ val pythonLibDir = layout.buildDirectory.dir("python-lib")
 val tutkRef = providers.gradleProperty("cuboai.tutkRef").orElse("main")
 
 val fetchPythonLib by tasks.registering {
-    description = "Download LAN protocol modules at build time. They are not part of this repo."
+    description = "Copy LAN protocol modules from a local cuboai-tutk checkout, else download them."
     val modules = pythonLibModules
     val ref = tutkRef
     val destDir = pythonLibDir
+    val localCandidates = listOf(
+        rootProject.projectDir.resolve("../../cuboai-tutk"),
+        rootProject.projectDir.resolve("../cuboai-tutk"),
+    )
+    val localTutk = localCandidates.firstOrNull { dir ->
+        modules.all { dir.resolve(it).isFile }
+    }
+    if (localTutk != null) {
+        modules.forEach { inputs.file(localTutk.resolve(it)) }
+    }
     outputs.dir(destDir)
     doLast {
         val dest = destDir.get().asFile
         dest.mkdirs()
+        if (localTutk != null) {
+            copy {
+                from(localTutk)
+                include(*modules.toTypedArray())
+                into(dest)
+            }
+            return@doLast
+        }
         val archive = dest.resolveSibling("tutk.tar.gz")
         val url = "https://codeload.github.com/Fredde87/cuboai-tutk/tar.gz/${ref.get()}"
         val connection = URI(url).toURL().openConnection().apply {

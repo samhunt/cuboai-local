@@ -1,14 +1,22 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.cuboai.local.ui
 
 import android.app.Application
+import android.view.TextureView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+import androidx.media3.extractor.ts.TsExtractor
+import android.util.Log
 import com.cuboai.local.data.CameraCredentials
 import com.cuboai.local.data.CameraStatus
 import com.cuboai.local.data.CloudAuthResult
@@ -19,6 +27,8 @@ import com.cuboai.local.data.LoginMode
 import com.cuboai.local.data.LullabySong
 import com.cuboai.local.data.PythonBridge
 import com.cuboai.local.data.Screen
+import com.cuboai.local.data.TsHub
+import com.cuboai.local.data.TsHubDataSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -29,6 +39,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.Executors
@@ -48,7 +59,7 @@ data class UiState(
     val mfaCode: String = "",
     val mfaRequired: Boolean = false,
     val mfaHint: String = "",
-    val cameras: List<CloudCamera> = emptyList(),
+    val cameras: List<CameraCredentials> = emptyList(),
     val selectedCameraId: String? = null,
 )
 
@@ -60,19 +71,78 @@ class CuboViewModel(application: Application) : AndroidViewModel(application) {
         Thread(it, "cuboai-python").apply { isDaemon = true }
     }.asCoroutineDispatcher()
 
+    private var sessionJob: Job? = null
+    private val savedCameras = store.loadCameras()
+    private val savedSelected = savedCameras.find { it.uid == store.loadSelectedUid() }
+        ?: savedCameras.firstOrNull()
+
     private val _state = MutableStateFlow(
-        store.credentials?.let { saved ->
-            UiState(form = saved, loginMode = LoginMode.Manual)
-        } ?: UiState(),
+        if (savedSelected != null) {
+            UiState(
+                form = savedSelected,
+                cameras = savedCameras,
+                selectedCameraId = savedSelected.uid,
+                loginMode = LoginMode.Manual,
+                remember = true,
+                screen = if (savedSelected.canConnect) Screen.Monitor else Screen.Login,
+                busy = savedSelected.canConnect,
+            )
+        } else {
+            UiState()
+        },
     )
     val state: StateFlow<UiState> = _state
 
-    val player: ExoPlayer = ExoPlayer.Builder(application).build().apply {
-        playWhenReady = true
-        repeatMode = Player.REPEAT_MODE_OFF
-    }
+    val player: ExoPlayer = ExoPlayer.Builder(application)
+        .setLoadControl(
+            DefaultLoadControl.Builder()
+                .setBufferDurationsMs(1_000, 5_000, 250, 500)
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build(),
+        )
+        .build()
+        .apply {
+            playWhenReady = true
+            repeatMode = Player.REPEAT_MODE_OFF
+            addListener(
+                object : Player.Listener {
+                    override fun onPlayerError(error: PlaybackException) {
+                        Log.e("cuboai-player", "playback error", error)
+                        _state.update { it.copy(error = error.localizedMessage ?: error.errorCodeName) }
+                        viewModelScope.launch {
+                            delay(800)
+                            if (_state.value.screen == Screen.Monitor && _state.value.streamReady) {
+                                attachPlayer()
+                            }
+                        }
+                    }
+
+                    override fun onRenderedFirstFrame() {
+                        Log.i(
+                            "cuboai-player",
+                            "first frame ${player.videoSize.width}x${player.videoSize.height}",
+                        )
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        Log.i("cuboai-player", "state=$playbackState")
+                    }
+                },
+            )
+        }
 
     private var pollJob: Job? = null
+    private var videoTexture: TextureView? = null
+
+    init {
+        if (savedSelected?.canConnect == true) {
+            viewModelScope.launch {
+                yield()
+                Log.i("cuboai-session", "auto-connect ${savedSelected.uid}")
+                connect()
+            }
+        }
+    }
 
     fun updateForm(transform: (CameraCredentials) -> CameraCredentials) {
         _state.update { it.copy(form = transform(it.form), error = null) }
@@ -105,7 +175,7 @@ class CuboViewModel(application: Application) : AndroidViewModel(application) {
         val password = _state.value.cuboPassword
         viewModelScope.launch {
             _state.update {
-                it.copy(busy = true, error = null, mfaRequired = false, mfaCode = "", cameras = emptyList())
+                it.copy(busy = true, error = null, mfaRequired = false, mfaCode = "")
             }
             val result = withContext(Dispatchers.IO) { runCatching { cloud.signIn(email, password) } }
             applyCloudResult(result)
@@ -121,66 +191,122 @@ class CuboViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun selectCamera(camera: CloudCamera) {
-        _state.update { current ->
-            current.copy(
-                selectedCameraId = camera.deviceId,
-                form = current.form.withCamera(camera),
-                error = null,
-            )
+    fun selectCamera(camera: CameraCredentials) {
+        if (_state.value.screen == Screen.Monitor) {
+            switchCamera(camera)
+            return
+        }
+        _state.update {
+            it.copy(selectedCameraId = camera.uid, form = camera, error = null)
         }
         persistIfRemembered()
     }
 
+    fun switchCamera(camera: CameraCredentials) {
+        val current = _state.value
+        if (camera.uid == current.form.uid && current.streamReady) return
+        if (!camera.canConnect) {
+            _state.update { it.copy(error = "Camera LAN IP is required for ${camera.label}.") }
+            return
+        }
+        _state.update {
+            it.copy(
+                form = camera,
+                selectedCameraId = camera.uid,
+                error = null,
+            )
+        }
+        persistIfRemembered()
+        startConnect(stayOnMonitorIfFail = true)
+    }
+
+    fun bindVideoTexture(view: TextureView) {
+        videoTexture = view
+        player.setVideoTextureView(view)
+        Log.i("cuboai-player", "texture bound")
+    }
+
+    fun unbindVideoTexture(view: TextureView) {
+        if (videoTexture !== view) return
+        videoTexture = null
+        player.setVideoTextureView(null)
+        Log.i("cuboai-player", "texture unbound")
+    }
+
     fun connect() {
+        startConnect(stayOnMonitorIfFail = false)
+    }
+
+    private fun startConnect(stayOnMonitorIfFail: Boolean) {
         val creds = _state.value.form
-        viewModelScope.launch {
-            _state.update { it.copy(busy = true, error = null) }
-            val result = withContext(pythonDispatcher) { bridge.connect(creds) }
+        sessionJob?.cancel()
+        sessionJob = viewModelScope.launch {
+            _state.update { it.copy(busy = true, error = null, streamReady = false) }
+            Log.i("cuboai-session", "connect ${creds.uid} ${creds.ip}")
+            stopPlayback()
+            val result = withContext(pythonDispatcher) {
+                runCatching { bridge.stopStream() }
+                runCatching { bridge.disconnect() }
+                bridge.connect(creds)
+            }
             result.fold(
                 onSuccess = {
-                    if (_state.value.remember) store.credentials = creds else store.clear()
+                    if (_state.value.remember) persistIfRemembered() else store.clear()
                     val songs = withContext(pythonDispatcher) { bridge.lullabies().getOrDefault(emptyList()) }
                     val stream = withContext(pythonDispatcher) { bridge.startStreamServer() }
                     stream.fold(
-                        onSuccess = { url ->
-                            attachPlayer(url)
+                        onSuccess = {
                             _state.update {
                                 it.copy(
                                     screen = Screen.Monitor,
                                     busy = false,
                                     songs = songs,
                                     streamReady = true,
+                                    error = null,
+                                    status = CameraStatus(),
                                 )
                             }
+                            delay(120)
+                            attachPlayer()
                             startPolling()
-                            refreshStatus()
+                            launch {
+                                delay(3_000)
+                                if (isActive && _state.value.screen == Screen.Monitor) {
+                                    refreshStatus()
+                                }
+                            }
                         },
                         onFailure = { err ->
-                            withContext(pythonDispatcher) { bridge.disconnect() }
-                            _state.update { it.copy(busy = false, error = err.message) }
+                            withContext(pythonDispatcher) { runCatching { bridge.disconnect() } }
+                            failConnect(err.message, stayOnMonitorIfFail)
                         },
                     )
                 },
                 onFailure = { err ->
-                    _state.update { it.copy(busy = false, error = err.message) }
+                    failConnect(err.message, stayOnMonitorIfFail)
                 },
             )
         }
     }
 
     fun disconnect(backToLogin: Boolean = true) {
-        pollJob?.cancel()
-        pollJob = null
-        player.stop()
-        player.clearMediaItems()
-        viewModelScope.launch {
+        sessionJob?.cancel()
+        sessionJob = viewModelScope.launch {
+            stopPlayback()
             withContext(pythonDispatcher) {
-                bridge.stopStream()
-                bridge.disconnect()
+                runCatching { bridge.stopStream() }
+                runCatching { bridge.disconnect() }
             }
             if (backToLogin) {
-                _state.update { it.copy(screen = Screen.Login, busy = false, streamReady = false) }
+                _state.update {
+                    it.copy(
+                        screen = Screen.Login,
+                        busy = false,
+                        streamReady = false,
+                        status = CameraStatus(),
+                        error = null,
+                    )
+                }
             }
         }
     }
@@ -224,19 +350,32 @@ class CuboViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
     }
 
-    private fun attachPlayer(url: String) {
-        val factory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(20_000)
-            .setReadTimeoutMs(30_000)
-            .setUserAgent("cuboai-local")
+    private fun attachPlayer() {
+        videoTexture?.let { player.setVideoTextureView(it) }
         val mediaItem = MediaItem.Builder()
-            .setUri(url)
+            .setUri(TsHubDataSource.URI)
             .setMimeType(MimeTypes.VIDEO_MP2T)
+            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().build())
             .build()
-        player.setMediaSource(ProgressiveMediaSource.Factory(factory).createMediaSource(mediaItem))
+        val flags = DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
+            DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES
+        val tsExtractors = ExtractorsFactory {
+            arrayOf(
+                TsExtractor(
+                    TsExtractor.MODE_SINGLE_PMT,
+                    flags,
+                    TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES,
+                ),
+            )
+        }
+        player.setMediaSource(
+            ProgressiveMediaSource.Factory(TsHubDataSource.Factory(), tsExtractors)
+                .setContinueLoadingCheckIntervalBytes(32 * 1024)
+                .createMediaSource(mediaItem),
+        )
         player.prepare()
         player.playWhenReady = true
+        Log.i("cuboai-player", "attached TsHub available=${TsHub.INSTANCE.available()}")
     }
 
     private fun startPolling() {
@@ -271,17 +410,22 @@ class CuboViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     is CloudAuthResult.Cameras -> {
-                        val first = auth.cameras.first()
                         _state.update { current ->
-                            val selected = auth.cameras.find { it.deviceId == current.selectedCameraId } ?: first
+                            val existing = current.cameras.associateBy { it.uid }
+                            val fetched = auth.cameras.map { it.toCredentials(existing[it.uid]) }
+                            val fetchedUids = fetched.map { it.uid }.toSet()
+                            val cameras = fetched + current.cameras.filter { it.uid !in fetchedUids }
+                            val selected = cameras.find { it.uid == current.selectedCameraId }
+                                ?: cameras.find { it.uid == current.form.uid }
+                                ?: cameras.first()
                             current.copy(
                                 busy = false,
                                 mfaRequired = false,
                                 mfaCode = "",
                                 cuboPassword = "",
-                                cameras = auth.cameras,
-                                selectedCameraId = selected.deviceId,
-                                form = current.form.withCamera(selected),
+                                cameras = cameras,
+                                selectedCameraId = selected.uid,
+                                form = selected.copy(ip = selected.ip.ifBlank { current.form.ip }),
                             )
                         }
                         persistIfRemembered()
@@ -297,18 +441,48 @@ class CuboViewModel(application: Application) : AndroidViewModel(application) {
     private fun persistIfRemembered() {
         val state = _state.value
         val form = state.form
-        if (state.remember && form.uid.isNotBlank() && form.account.isNotBlank() && form.password.isNotBlank()) {
-            store.credentials = form
+        if (!state.remember || form.uid.isBlank() || form.account.isBlank() || form.password.isBlank()) {
+            return
+        }
+        val cameras = state.cameras
+            .map { if (it.uid == form.uid) form else it }
+            .let { list -> if (list.any { it.uid == form.uid }) list else list + form }
+            .ifEmpty { listOf(form) }
+        store.saveCameras(cameras, form.uid)
+        _state.update { current ->
+            if (current.cameras == cameras && current.selectedCameraId == form.uid) current
+            else current.copy(cameras = cameras, selectedCameraId = form.uid)
         }
     }
 
-    private fun CameraCredentials.withCamera(camera: CloudCamera): CameraCredentials = copy(
-        name = camera.name.ifBlank { name },
-        uid = camera.uid,
-        account = camera.account,
-        password = camera.password,
-        ip = camera.ip.ifBlank { ip },
-    )
+    private fun CloudCamera.toCredentials(existing: CameraCredentials?): CameraCredentials =
+        CameraCredentials(
+            name = name.ifBlank { existing?.name ?: "Camera" },
+            ip = ip.ifBlank { existing?.ip.orEmpty() },
+            uid = uid,
+            account = account,
+            password = password,
+        )
+
+    private fun failConnect(message: String?, stayOnMonitor: Boolean) {
+        _state.update {
+            it.copy(
+                busy = false,
+                error = message,
+                screen = if (stayOnMonitor) Screen.Monitor else Screen.Login,
+                streamReady = false,
+            )
+        }
+    }
+
+    private fun stopPlayback() {
+        pollJob?.cancel()
+        pollJob = null
+        player.stop()
+        player.clearMediaItems()
+        // Keep the TextureView. Auto-connect and camera switch stay on Monitor,
+        // so Compose will not recreate it; clearing the surface leaves a black video.
+    }
 
     private fun command(block: PythonBridge.() -> Result<Unit>) {
         viewModelScope.launch {

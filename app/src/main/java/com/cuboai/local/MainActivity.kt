@@ -47,14 +47,16 @@ class MainActivity : ComponentActivity() {
                         )
                         Screen.Monitor -> MonitorScreen(
                             state = state,
-                            player = viewModel.player,
                             onNightLight = viewModel::setNightLight,
                             onBrightness = viewModel::setBrightness,
                             onSleepMode = viewModel::setSleepMode,
                             onPlaySong = viewModel::playLullaby,
                             onStopSong = viewModel::stopLullaby,
                             onDisconnect = { viewModel.disconnect() },
+                            onSwitchCamera = viewModel::switchCamera,
                             onShowLicense = viewModel::showLicense,
+                            onBindVideoView = viewModel::bindVideoTexture,
+                            onUnbindVideoView = viewModel::unbindVideoTexture,
                             modifier = padded,
                         )
                         is Screen.License -> LicenseScreen(

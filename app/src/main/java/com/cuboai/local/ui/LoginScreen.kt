@@ -41,7 +41,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.cuboai.local.data.CameraCredentials
-import com.cuboai.local.data.CloudCamera
 import com.cuboai.local.data.LoginMode
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,7 +55,7 @@ fun LoginScreen(
     onMfaCode: (String) -> Unit,
     onFetchCameras: () -> Unit,
     onSubmitMfa: () -> Unit,
-    onSelectCamera: (CloudCamera) -> Unit,
+    onSelectCamera: (CameraCredentials) -> Unit,
     onConnect: () -> Unit,
     onShowLicense: () -> Unit,
     modifier: Modifier = Modifier,
@@ -104,7 +103,12 @@ fun LoginScreen(
                         onSelectCamera = onSelectCamera,
                         onFormChange = onFormChange,
                     )
-                    LoginMode.Manual -> ManualFields(form = form, onFormChange = onFormChange)
+                    LoginMode.Manual -> {
+                        if (state.cameras.size > 1) {
+                            CameraPicker(state = state, onSelectCamera = onSelectCamera)
+                        }
+                        ManualFields(form = form, onFormChange = onFormChange)
+                    }
                 }
                 Field("Camera LAN IP", form.ip, KeyboardType.Uri) { value ->
                     onFormChange { it.copy(ip = value) }
@@ -154,7 +158,7 @@ private fun CuboAccountFields(
     onMfaCode: (String) -> Unit,
     onFetchCameras: () -> Unit,
     onSubmitMfa: () -> Unit,
-    onSelectCamera: (CloudCamera) -> Unit,
+    onSelectCamera: (CameraCredentials) -> Unit,
     onFormChange: ((CameraCredentials) -> CameraCredentials) -> Unit,
 ) {
     Text(
@@ -206,7 +210,7 @@ private fun CuboAccountFields(
         Field("Admin account", state.form.account) { value ->
             onFormChange { it.copy(account = value) }
         }
-        Field("Admin password", state.form.password) { value ->
+        Field("Admin password", state.form.password, KeyboardType.Password, password = true) { value ->
             onFormChange { it.copy(password = value) }
         }
     }
@@ -225,7 +229,7 @@ private fun ManualFields(
     Field("Name", form.name) { value -> onFormChange { it.copy(name = value) } }
     Field("Device UID", form.uid) { value -> onFormChange { it.copy(uid = value) } }
     Field("Admin account", form.account) { value -> onFormChange { it.copy(account = value) } }
-    Field("Admin password", form.password) { value ->
+    Field("Admin password", form.password, KeyboardType.Password, password = true) { value ->
         onFormChange { it.copy(password = value) }
     }
 }
@@ -234,13 +238,13 @@ private fun ManualFields(
 @Composable
 private fun CameraPicker(
     state: UiState,
-    onSelectCamera: (CloudCamera) -> Unit,
+    onSelectCamera: (CameraCredentials) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val selected = state.cameras.find { it.deviceId == state.selectedCameraId } ?: state.cameras.first()
+    val selected = state.cameras.find { it.uid == state.selectedCameraId } ?: state.cameras.first()
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
         OutlinedTextField(
-            value = selected.name,
+            value = selected.label,
             onValueChange = {},
             readOnly = true,
             label = { Text("Camera") },
@@ -252,7 +256,7 @@ private fun CameraPicker(
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             state.cameras.forEach { camera ->
                 DropdownMenuItem(
-                    text = { Text("${camera.name} (${camera.uid})") },
+                    text = { Text("${camera.label} (${camera.uid})") },
                     onClick = {
                         onSelectCamera(camera)
                         expanded = false

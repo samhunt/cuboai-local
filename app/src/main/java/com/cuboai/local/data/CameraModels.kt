@@ -6,7 +6,13 @@ data class CameraCredentials(
     val uid: String = "",
     val account: String = "",
     val password: String = "",
-)
+) {
+    val canConnect: Boolean
+        get() = uid.isNotBlank() && account.isNotBlank() && password.isNotBlank() && ip.isNotBlank()
+
+    val label: String
+        get() = name.ifBlank { uid.ifBlank { "Camera" } }
+}
 
 enum class LoginMode { CuboAccount, Manual }
 

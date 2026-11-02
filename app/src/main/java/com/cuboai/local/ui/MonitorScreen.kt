@@ -1,8 +1,10 @@
 package com.cuboai.local.ui
 
+import android.view.TextureView
 import android.view.ViewGroup
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -11,10 +13,12 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -29,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -37,21 +42,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.ui.PlayerView
+import com.cuboai.local.data.CameraCredentials
 import com.cuboai.local.data.LullabySong
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun MonitorScreen(
     state: UiState,
-    player: androidx.media3.exoplayer.ExoPlayer,
     onNightLight: (Boolean) -> Unit,
     onBrightness: (Int) -> Unit,
     onSleepMode: (Boolean) -> Unit,
     onPlaySong: (String) -> Unit,
     onStopSong: () -> Unit,
     onDisconnect: () -> Unit,
+    onSwitchCamera: (CameraCredentials) -> Unit,
     onShowLicense: () -> Unit,
+    onBindVideoView: (TextureView) -> Unit,
+    onUnbindVideoView: (TextureView) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val status = state.status
@@ -64,35 +71,67 @@ fun MonitorScreen(
         mutableStateOf((status.brightness ?: 0).coerceIn(0, 100).toFloat())
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-    ) {
-        AndroidView(
-            factory = { context ->
-                PlayerView(context).apply {
-                    useController = true
-                    this.player = player
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                    )
-                    setBackgroundColor(android.graphics.Color.BLACK)
-                }
-            },
-            update = { it.player = player },
+    Column(modifier = modifier.fillMaxSize()) {
+        if (state.cameras.size > 1) {
+            CameraSwitcher(
+                cameras = state.cameras,
+                selectedUid = state.form.uid,
+                enabled = !state.busy,
+                onSelect = onSwitchCamera,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
                 .background(Color.Black),
-        )
+        ) {
+            key(state.form.uid) {
+                AndroidView(
+                    factory = { context ->
+                        TextureView(context).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
+                            onBindVideoView(this)
+                        }
+                    },
+                    update = { onBindVideoView(it) },
+                    onRelease = { onUnbindVideoView(it) },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (state.busy || !state.streamReady) {
+                Column(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(36.dp),
+                        color = Color.White,
+                        strokeWidth = 3.dp,
+                    )
+                    Text("Connecting…", color = Color.White)
+                }
+            }
+        }
 
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text(state.form.name.ifBlank { "Camera" }, style = MaterialTheme.typography.titleLarge)
+            if (state.cameras.size <= 1) {
+                Text(state.form.label, style = MaterialTheme.typography.titleLarge)
+            }
             Text(
                 "LAN only · ${state.form.ip}",
                 style = MaterialTheme.typography.bodySmall,
@@ -174,6 +213,47 @@ fun MonitorScreen(
             ) {
                 TextButton(onClick = onShowLicense) { Text("License") }
                 TextButton(onClick = onDisconnect) { Text("Disconnect") }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CameraSwitcher(
+    cameras: List<CameraCredentials>,
+    selectedUid: String,
+    enabled: Boolean,
+    onSelect: (CameraCredentials) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = cameras.find { it.uid == selectedUid } ?: cameras.first()
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { if (enabled) expanded = it },
+        modifier = modifier,
+    ) {
+        OutlinedTextField(
+            value = selected.label,
+            onValueChange = {},
+            readOnly = true,
+            enabled = enabled,
+            label = { Text("Camera") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            cameras.forEach { camera ->
+                DropdownMenuItem(
+                    text = { Text("${camera.label} · ${camera.ip.ifBlank { camera.uid }}") },
+                    onClick = {
+                        onSelect(camera)
+                        expanded = false
+                    },
+                )
             }
         }
     }
